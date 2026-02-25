@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
 #-------------------------------------------------------------------------------
 #   convert.py: changes HLA resolution and converts nomenclature to p/g-groups.
@@ -27,7 +26,6 @@ import os
 import json
 import argparse
 import pandas as pd
-import pickle
 
 from argparse import RawTextHelpFormatter
 from os.path import isfile, isdir, dirname, realpath
@@ -60,20 +58,20 @@ def convert_allele(allele, resolution):
                      'to g-group.')
 
         # Output: 1-field allele unless forced
-        elif type(resolution) == int:
+        elif isinstance(resolution, int):
             if resolution > 1 and not args.force:
                 sys.exit('[convert] Error: p-group cannot be ' +
-                         'converted to %.0f fields.' %resolution)
+                         f'converted to {resolution:.0f} fields.')
             allele = process_allele(allele[:-1], resolution)
 
     # Input: G-group allele
     elif allele[-1] == 'G':
 
         # Output: 1-field allele unless forced
-        if type(resolution) == int:
+        if isinstance(resolution, int):
             if resolution > 1 and not args.force:
                 sys.exit('[convert] Error: g-group cannot be converted' +
-                         'to %.0f fields.' %resolution)
+                         f'to {resolution:.0f} fields.')
             allele = process_allele(allele[:-1], resolution)
             
         # Output: P-group allele
@@ -100,7 +98,7 @@ def convert_allele(allele, resolution):
             
     # Input: ungrouped allele
     # Output: reduced resolution, ungrouped allele
-    elif type(resolution) == int:
+    elif isinstance(resolution, int):
         allele = process_allele(allele, resolution)
         
     return allele
@@ -153,8 +151,6 @@ if __name__ == '__main__':
     
     args = parser.parse_args()
     
-    #p_group, g_group = pickle.load(open(hla_convert,'rb'))
-    #to do, test this
     with open(hla_convert_json, 'r') as file:
         p_group,g_group = json.load(file)
     
@@ -190,7 +186,7 @@ if __name__ == '__main__':
 
     for subject, genotype in genotypes.items():
         for gene, allele in genotype.items():
-            if type(allele) != str:
+            if not isinstance(allele, str):
                 continue
 
             genotypes[subject][gene] = convert_allele(allele, resolution)

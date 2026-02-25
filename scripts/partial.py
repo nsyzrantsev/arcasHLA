@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
 #-------------------------------------------------------------------------------
 #   partial.py: genotypes partial alleles from extracted reads.
@@ -26,7 +25,6 @@ import os
 import sys
 import re
 import json
-import pickle
 import argparse
 import pandas as pd
 import logging as log
@@ -117,19 +115,19 @@ def type_partial(eqs, gene, partial_exons, complete_genotype, partial_alleles,
     
     # Return count of a single allele
     def get_single_count(a):
-        return sum([eqs[group][gene][idx][1] for idx in allele_eq[group][a]])
+        return sum(eqs[group][gene][idx][1] for idx in allele_eq[group][a])
 
     # Return count of a pair of alleles
     def get_pair_count(a1, a2):
         indices = allele_eq[group][a1] | allele_eq[group][a2]
-        return sum([eqs[group][gene][idx][1] for idx in indices])
+        return sum(eqs[group][gene][idx][1] for idx in indices)
 
     # Return nonshared count of a pair of alleles
     def get_nonshared_count(a1, a2):
         a1_indices = allele_eq[group][a1] - allele_eq[group][a2]
         a2_indices = allele_eq[group][a2] - allele_eq[group][a1]
-        a1_count = sum([eqs[group][gene][idx][1] for idx in a1_indices])
-        a2_count = sum([eqs[group][gene][idx][1] for idx in a2_indices])
+        a1_count = sum(eqs[group][gene][idx][1] for idx in a1_indices)
+        a2_count = sum(eqs[group][gene][idx][1] for idx in a2_indices)
         return a1_count, a2_count
     
     if gene not in {'A', 'B', 'C', 'DRB1', 'DQB1', 'DQA1'}:
@@ -195,7 +193,7 @@ def type_partial(eqs, gene, partial_exons, complete_genotype, partial_alleles,
         possible_alleles &= {allele for allele in exon_groups[group] 
                              if get_single_count(allele) > 10 + min_count}
 
-        total_count = sum([count for _,count in eqs[group][gene]])
+        total_count = sum(count for _,count in eqs[group][gene])
 
         # Get percent explained reads by complete genotype
         pair_count = get_pair_count(a1, a2)
@@ -260,16 +258,16 @@ def arg_check_files(parser, arg):
     accepted_formats = ('alignment.p','fq.gz','fastq.gz','fq','fastq')
     for file in arg.split():
         if not os.path.isfile(file):
-            parser.error('The file %s does not exist.' %file)
+            parser.error(f'The file {file} does not exist.')
         elif not file.lower().endswith(accepted_formats):
-            parser.error('The format of %s is invalid.' %file)
+            parser.error(f'The format of {file} is invalid.')
         return arg
     
 def arg_check_genotype(parser, arg):
     if not os.path.isfile(arg):
-        parser.error('The genotype file %s does not exist.' %arg)
+        parser.error(f'The genotype file {arg} does not exist.')
     elif not arg.endswith('.genotype.json'):
-        parser.error('The genotype file %s is invalid' %arg)
+        parser.error(f'The genotype file {arg} is invalid')
     return arg
         
 def arg_check_genes(parser, arg):
@@ -277,14 +275,14 @@ def arg_check_genes(parser, arg):
         return sorted(genes)
     input_genes = {gene.upper() for gene in arg.split(',')} & genes
     if not input_genes:
-        parser.error('The gene list %s is invalid.' %arg)
+        parser.error(f'The gene list {arg} is invalid.')
     return sorted(input_genes)
 
 def arg_check_population(parser, arg):
     if arg.lower() == 'none':
         return None
     if arg not in populations:
-        parser.error('The population %s is invalid.' %arg)
+        parser.error(f'The population {arg} is invalid.')
     return arg
     
 def arg_check_tolerance(parser, arg):
@@ -293,7 +291,7 @@ def arg_check_tolerance(parser, arg):
         if value > 1 or value < 0:
             parser.error('The tolerence must be between 0 and 1.')
         return value
-    except:
+    except Exception:
         parser.error('The tolerence must be a floating point number.')
     
 def arg_check_iterations(parser, arg):
@@ -302,7 +300,7 @@ def arg_check_iterations(parser, arg):
         if value < 0:
             parser.error('The number of iterations must be positive.')
         return value
-    except:
+    except Exception:
         parser.error('The number of iterations must be an integer.')
     
 def arg_check_threshold(parser, arg):
@@ -311,7 +309,7 @@ def arg_check_threshold(parser, arg):
         if value > 1 or value < 0:
             parser.error('The threshold must be between 0 and 1.')
         return value
-    except:
+    except Exception:
         parser.error('The threshold is invalid.')
     
 
@@ -480,9 +478,9 @@ if __name__ == '__main__':
         
     log.info('')
     hline()
-    log.info(f'[log] Date: %s', str(date.today()))
-    log.info(f'[log] Sample: %s', sample)
-    log.info(f'[log] Input file(s): %s', ', '.join(args.file))
+    log.info('[log] Date: %s', str(date.today()))
+    log.info('[log] Sample: %s', sample)
+    log.info('[log] Input file(s): %s', ', '.join(args.file))
         
     
     prior = pd.read_csv(hla_freq, delimiter='\t')
@@ -492,23 +490,21 @@ if __name__ == '__main__':
     check_ref()
     
     # Loads reference information
-    #with open(partial_p, 'rb') as file:
-    #    reference_info = pickle.load(file)
-    #    (commithash, (gene_set, allele_idx, exon_idx, 
-    #        lengths, partial_exons, partial_alleles)) = reference_info
     with open(partial_json, 'r') as file:
         reference_info = json.load(file)
-        (commithash, (gene_set, allele_idx, exon_idx, 
+        (commithash, (gene_set, allele_idx, exon_idx,
             lengths, partial_exons, partial_alleles)) = reference_info
         gene_set = set(gene_set)
         allele_idx = json.loads(allele_idx)
         exon_idx = json.loads(exon_idx)
         lengths = json.loads(lengths)
-        lengths = dict([a, int(x)] for a, x in lengths.items())
+        lengths = {a: int(x) for a, x in lengths.items()}
         partial_exons = json.loads(partial_exons)
         partial_alleles = set(partial_alleles)
-        
-    log.info(f'[log] Reference: %s', commithash)
+        reference_info = (commithash, (gene_set, allele_idx, exon_idx,
+            lengths, partial_exons, partial_alleles))
+
+    log.info('[log] Reference: %s', commithash)
     hline()  
           
     # Runs transcript assembly if intermediate json not provided

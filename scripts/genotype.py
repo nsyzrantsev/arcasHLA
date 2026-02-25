@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
 #-------------------------------------------------------------------------------
 #   genotype.py: genotypes from extracted reads.
@@ -26,12 +25,11 @@ import os
 import sys
 import re
 import json
-import pickle
 import argparse
 import logging as log
 
-import numpy as np
 import math
+import numpy as np
 import pandas as pd
 
 from datetime import date
@@ -64,33 +62,33 @@ parameters_json = rootDir + 'dat/info/parameters.json'
 # Genotype
 #-----------------------------------------------------------------------------
 
-def expectation_maximization(eqs, lengths, allele_idx, population, prior, 
-                             tolerance, max_iterations, drop_iterations, 
+def expectation_maximization(eqs, lengths, allele_idx, population, prior,
+                             tolerance, max_iterations, drop_iterations,
                              drop_threshold):
     '''Quantifies allele transcript abundance. Based on the methods
        used in HISAT-genotype (http://dx.doi.org/10.1101/266197).
     '''
 
-    # Divides raw counts between alleles for the first iteration 
-    # of transcript quantification
+    # Divides raw counts between alleles for the first iteration
+    # of transcript quantification (dict-based, runs once)
     def initial_abundances(eqs, lengths, population):
-    
+
         # Divides counts equally between alleles in the same compatibility class
         def divide_equally(alleles, count):
             n_alleles = len(alleles)
             for allele in alleles:
                 counts[allele] += count / n_alleles
-                
+
         # Divides counts proportionally to allele frequency
         def divide_prior(alleles, count, allele_prob):
             total_prob = sum(allele_prob.values())
             for allele in alleles:
                 counts[allele] += count * (allele_prob[allele]/total_prob)
-        
+
         counts = defaultdict(float)
         undivided_counts = defaultdict(float)
         for alleles, count in eqs:
-            
+
             allele_prior = defaultdict(float)
             for idx in alleles:
                 undivided_counts[idx] += count
@@ -101,149 +99,184 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
             if population and allele_prior:
                 divide_prior(alleles, count, allele_prior)
                 continue
-                    
-            divide_equally(alleles, count)
-                
-        return counts_to_abundances(counts), undivided_counts
-    
-    # Normalizes counts by allele length and convert to abundances
-    def counts_to_abundances(counts):
-        abundances = defaultdict(float)
-        
-        for allele, count in counts.items():
-            length = lengths[allele]
-            abundances[allele] = count / length
-        
-        total_abundance = sum(abundances.values())
-        
-        for allele, abundance in abundances.items():
-            abundances[allele] = abundance / total_abundance
-            
-        return abundances
-    
-    # Redistribute counts between alleles in the same compatibility 
-    # class based on their overall abundance
-    def update_abundances(eqs, abundances):
-        counts = defaultdict(float)
-        
-        for alleles, count in eqs:
-            alleles = [allele for allele in alleles if allele in abundances]
-            total_abundance = sum([abundances[allele] for allele in alleles])
-            
-            if total_abundance == 0:
-                continue
-            
-            for allele in alleles:
-                counts[allele] += count * (abundances[allele]/total_abundance)
-                
-        return counts_to_abundances(counts)
-    
-    # Drop low support alleles after a specified number of iterations if their 
-    # abundance is less than a specified proportion of the greatest abundance
-    def drop_alleles(eqs, abundances, drop_iterations, drop_threshold, 
-                     iterations, converged):
-        if iterations == 1:
-            abundances = {allele:abundance 
-                          for allele, abundance in abundances.items()
-                          if abundance > 0.0}
-            
-        elif iterations >= drop_iterations or converged:
-            threshold = drop_threshold * max(abundances.values())
-            abundances = {allele:abundance 
-                          for allele, abundance in abundances.items() 
-                          if abundance >= threshold}
-        return abundances, eqs
-    
-    # Compute square root of sum of squares
-    def SRSS(theta):
-        square_sum = 0.0
-        for i in theta:
-            square_sum += i**2
-        return math.sqrt(square_sum)
 
-    # Check if sum difference between two iterations is below tolerance
-    def check_convergence(theta0, theta_prime):
-        diff = [theta_prime[allele] - theta0[allele] for allele in theta0]
-        residual_error = SRSS(diff)
-        return residual_error < tolerance
+            divide_equally(alleles, count)
+
+        # Normalize counts by allele length
+        abundances = defaultdict(float)
+        for allele, count in counts.items():
+            abundances[allele] = count / lengths[allele]
+        total_abundance = sum(abundances.values())
+        for allele in abundances:
+            abundances[allele] /= total_abundance
+
+        return abundances, undivided_counts
 
     converged = False
     iterations = 1
 
-    theta0, undivided_counts = initial_abundances(eqs, lengths, population)
-    
+    theta0_dict, undivided_counts = initial_abundances(eqs, lengths, population)
+
     log.info('[genotype] Top 10 alleles by undivided read count:')
     log.info('\t\t{: <20}    {: >10}\t'.format('allele', 'read count'))
-    
-    for idx, count in sorted(undivided_counts.items(), 
-                             key=lambda x: x[1], 
+
+    for idx, count in sorted(undivided_counts.items(),
+                             key=lambda x: x[1],
                              reverse = True)[:10]:
-                                     
+
         log.info('\t\t{: <20}    {: >10.0f}\t'
                  .format(process_allele(allele_idx[idx][0], 3), count))
 
     log.info(f'\n[genotype] Quantifying allele transcript abundance')
-    
+
+    # --- Convert from dict to numpy arrays for vectorized EM ---
+    all_alleles = sorted(theta0_dict.keys())
+    allele_to_int = {a: i for i, a in enumerate(all_alleles)}
+    n_alleles = len(all_alleles)
+    len_arr = np.array([lengths[a] for a in all_alleles], dtype=np.float64)
+
+    # Build CSR-like eq structure (only eq classes with mapped alleles)
+    offsets = [0]
+    flat_indices = []
+    counts_list = []
+    for alleles, count in eqs:
+        start = len(flat_indices)
+        for a in alleles:
+            if a in allele_to_int:
+                flat_indices.append(allele_to_int[a])
+        if len(flat_indices) > start:
+            counts_list.append(count)
+            offsets.append(len(flat_indices))
+    eq_offsets = np.array(offsets, dtype=np.int64)
+    eq_alleles = np.array(flat_indices, dtype=np.int64)
+    counts_arr = np.array(counts_list, dtype=np.float64)
+
+    # Pre-separate single-allele eq classes for fast path
+    sizes = eq_offsets[1:] - eq_offsets[:-1]
+    single_mask = sizes == 1
+    single_eq_offsets = eq_offsets[:-1][single_mask]
+    single_allele_ints = eq_alleles[single_eq_offsets]
+    single_counts = counts_arr[single_mask]
+    multi_indices = np.where(~single_mask)[0]
+
+    # Initialize theta0 as array
+    theta0 = np.array([theta0_dict.get(a, 0.0) for a in all_alleles],
+                      dtype=np.float64)
+
+    def update_abundances_vec(ab_arr):
+        new_counts = np.zeros(n_alleles, dtype=np.float64)
+        # Fast path: single-allele classes — pure numpy
+        np.add.at(new_counts, single_allele_ints, single_counts)
+        # Slow path: multi-allele classes — Python loop (fewer iterations)
+        for i in multi_indices:
+            s, e = eq_offsets[i], eq_offsets[i+1]
+            idxs = eq_alleles[s:e]
+            ab = ab_arr[idxs]
+            total = ab.sum()
+            if total == 0.0:
+                continue
+            new_counts[idxs] += counts_arr[i] * (ab / total)
+        # Normalize by length
+        ab = new_counts / len_arr
+        total = ab.sum()
+        if total > 0:
+            ab /= total
+        return ab
+
+    def drop_alleles_vec(ab_arr, iterations, converged):
+        if iterations == 1:
+            mask = ab_arr > 0.0
+        elif iterations >= drop_iterations or converged:
+            threshold = drop_threshold * ab_arr.max()
+            mask = ab_arr >= threshold
+        else:
+            return False  # No drop needed
+
+        if mask.all():
+            return False  # Nothing to drop
+
+        # Compact arrays to remaining alleles
+        keep = np.where(mask)[0]
+        return keep
+
     # SQUAREM - accelerated EM
     # R. Varadhan & C. Roland (doi: 10.1 1 1 1/j. 1467-9469.2007.00585.X)
     # Used by HISAT-genotype, originaly used by Sailfish
     while iterations < max_iterations and not converged:
-        # Get next two steps
-        theta1 = update_abundances(eqs, theta0)
-        theta2 = update_abundances(eqs, theta1)
-        theta_prime = defaultdict(float)
+        # Get next two EM steps
+        theta1 = update_abundances_vec(theta0)
+        theta2 = update_abundances_vec(theta1)
 
-        r = dict()
-        v = dict()
-        sum_r = 0.0
-        sum_v = 0.0
-        
-        # Compute r and v
-        for allele in theta1:
-            r[allele] = theta1[allele] - theta0[allele]
-            v[allele] = (theta2[allele] - theta1[allele]) - r[allele]
-            
-        srss_r = SRSS(r.values())
-        srss_v = SRSS(v.values())
+        # Compute r and v vectors
+        r = theta1 - theta0
+        v = (theta2 - theta1) - r
+
+        srss_r = np.linalg.norm(r)
+        srss_v = np.linalg.norm(v)
 
         if srss_v != 0:
             # Compute step length
             alpha = -(srss_r / srss_v)
-            for allele in r:
-                value =   theta0[allele] \
-                        - 2*alpha*r[allele] \
-                        + (alpha**2)*v[allele]
-                        
-                theta_prime[allele] = value
-                
-            step_min = min(theta_prime.values())
-            step_max = max(theta_prime.values())
+            theta_prime = theta0 - 2*alpha*r + alpha**2 * v
 
+            step_min = theta_prime.min()
             # Adjust step rather than kicking out alleles with a negative result
             if step_min < 0:
-                theta_prime = {allele:(value-step_min)/(step_max-step_min) 
-                               for allele, value in theta_prime.items()}
-                               
-                total = sum(theta_prime.values())
-                
-                theta_prime = {allele:value/total 
-                               for allele, value in theta_prime.items()}
-     
-            # Update abundances with given the new proportions
-            theta_prime = update_abundances(eqs, theta_prime)
-            
+                step_max = theta_prime.max()
+                theta_prime = (theta_prime - step_min) / (step_max - step_min)
+                theta_prime /= theta_prime.sum()
+
+            # Update abundances with the new proportions
+            theta_prime = update_abundances_vec(theta_prime)
         else:
             theta_prime = theta1
-            
-        converged = check_convergence(theta0, theta_prime)
 
-        theta0, eqs = drop_alleles(eqs, theta_prime, drop_iterations, 
-                                   drop_threshold, iterations, converged)
+        # Check convergence
+        converged = np.linalg.norm(theta_prime - theta0) < tolerance
+
+        # Drop low-support alleles
+        keep = drop_alleles_vec(theta_prime, iterations, converged)
+        if keep is not False:
+            # Remap to compacted arrays
+            n_alleles = len(keep)
+            all_alleles = [all_alleles[k] for k in keep]
+            old_to_new = {int(old): new for new, old in enumerate(keep)}
+            len_arr = len_arr[keep]
+            theta0 = theta_prime[keep]
+
+            # Rebuild eq structures for remaining alleles
+            new_offsets = [0]
+            new_flat = []
+            new_counts = []
+            for i in range(len(counts_arr)):
+                s, e = eq_offsets[i], eq_offsets[i+1]
+                mapped = [old_to_new[int(x)] for x in eq_alleles[s:e]
+                          if int(x) in old_to_new]
+                if mapped:
+                    new_flat.extend(mapped)
+                    new_counts.append(counts_arr[i])
+                    new_offsets.append(len(new_flat))
+
+            eq_offsets = np.array(new_offsets, dtype=np.int64)
+            eq_alleles = np.array(new_flat, dtype=np.int64)
+            counts_arr = np.array(new_counts, dtype=np.float64)
+
+            # Rebuild single/multi separation
+            sizes = eq_offsets[1:] - eq_offsets[:-1]
+            single_mask = sizes == 1
+            single_eq_offsets = eq_offsets[:-1][single_mask]
+            single_allele_ints = eq_alleles[single_eq_offsets]
+            single_counts = counts_arr[single_mask]
+            multi_indices = np.where(~single_mask)[0]
+        else:
+            theta0 = theta_prime
+
         iterations += 1
-         
+
     log.info(f'[genotype] EM converged after {iterations} iterations')
-    
-    return theta0
+
+    # Convert back to dict for return value
+    return {all_alleles[i]: theta0[i] for i in range(n_alleles) if theta0[i] > 0}
 
 def predict_genotype(eqs, allele_idx, allele_eq, em_results, gene_count, 
                      population, prior, zygosity_threshold):
@@ -254,30 +287,30 @@ def predict_genotype(eqs, allele_idx, allele_eq, em_results, gene_count,
     # Returns number of reads explained by an allele
     def get_count(a):
         observed_eqs = allele_eq[a]
-        return sum([eqs[idx][1] for idx in observed_eqs])
-    
+        return sum(eqs[idx][1] for idx in observed_eqs)
+
     # Returns number of reads explained by a pair of alleles
     def get_pair_count(a1, a2):
-        if type(a1) == tuple:
+        if isinstance(a1, tuple):
             a1_eqs = set.union(*[allele_eq[idx] for idx in a1])
         else:
             a1_eqs = allele_eq[a1]
-        if type(a2) == tuple:
+        if isinstance(a2, tuple):
             a2_eqs =set.union(*[allele_eq[idx] for idx in a2])
         else:
             a2_eqs = allele_eq[a2]
         
         observed_eqs = a1_eqs | a2_eqs
-        
-        return sum([eqs[idx][1] for idx in observed_eqs])
-        
+
+        return sum(eqs[idx][1] for idx in observed_eqs)
+
     # Returns non-shared counts for a pair of alleles
     def get_nonshared_count(a1, a2):
-        if type(a1) == tuple:
+        if isinstance(a1, tuple):
             a1_eqs = set.union(*[allele_eq[idx] for idx in a1])
         else:
             a1_eqs = allele_eq[a1]
-        if type(a2) == tuple:
+        if isinstance(a2, tuple):
             a2_eqs =set.union(*[allele_eq[idx] for idx in a2])
         else:
             a2_eqs = allele_eq[a2]
@@ -285,8 +318,8 @@ def predict_genotype(eqs, allele_idx, allele_eq, em_results, gene_count,
         a1_nonshared_eqs = a1_eqs - a2_eqs
         a2_nonshared_eqs = a2_eqs - a1_eqs
         
-        a1_count = sum([eqs[idx][1] for idx in a1_nonshared_eqs])
-        a2_count = sum([eqs[idx][1] for idx in a2_nonshared_eqs])
+        a1_count = sum(eqs[idx][1] for idx in a1_nonshared_eqs)
+        a2_count = sum(eqs[idx][1] for idx in a2_nonshared_eqs)
         
         return a1_count, a2_count
         
@@ -404,10 +437,6 @@ def genotype_gene(gene, gene_count, eqs, lengths, allele_idx, population,
     if gene not in {'A', 'B', 'C', 'DRB1', 'DQB1', 'DQA1'}:
         population = None
 
-    allele_idx = json.loads(allele_idx)
-    lengths = json.loads(lengths)
-    lengths = dict([a, int(x)] for a, x in lengths.items())
-
     em_results = expectation_maximization(eqs, 
                                           lengths, 
                                           allele_idx, 
@@ -458,9 +487,9 @@ def arg_check_files(parser, arg):
     accepted_formats = ('alignment.p','fq.gz','fastq.gz','fq','fastq')
     for file in arg.split():
         if not os.path.isfile(file):
-            parser.error('The file %s does not exist.' %file)
+            parser.error(f'The file {file} does not exist.')
         elif not file.lower().endswith(accepted_formats):
-            parser.error('The format of %s is invalid.' %file)
+            parser.error(f'The format of {file} is invalid.')
         return arg
         
 def arg_check_genes(parser, arg):
@@ -468,14 +497,14 @@ def arg_check_genes(parser, arg):
         return sorted(genes)
     input_genes = {gene.upper() for gene in arg.split(',')} & genes
     if not input_genes:
-        parser.error('The gene list %s is invalid.' %arg)
+        parser.error(f'The gene list {arg} is invalid.')
     return sorted(input_genes)
 
 def arg_check_population(parser, arg):
     if arg.lower() == 'none':
         return None
     if arg not in populations:
-        parser.error('The population %s is invalid.' %arg)
+        parser.error(f'The population {arg} is invalid.')
     return arg
     
 def arg_check_tolerance(parser, arg):
@@ -484,7 +513,7 @@ def arg_check_tolerance(parser, arg):
         if value > 1 or value < 0:
             parser.error('The tolerence must be between 0 and 1.')
         return value
-    except:
+    except Exception:
         parser.error('The tolerence must be a floating point number.')
     
 def arg_check_iterations(parser, arg):
@@ -493,7 +522,7 @@ def arg_check_iterations(parser, arg):
         if value < 0:
             parser.error('The number of iterations must be positive.')
         return value
-    except:
+    except Exception:
         parser.error('The number of iterations must be an integer.')
     
 def arg_check_threshold(parser, arg):
@@ -502,7 +531,7 @@ def arg_check_threshold(parser, arg):
         if value > 1 or value < 0:
             parser.error('The threshold must be between 0 and 1.')
         return value
-    except:
+    except Exception:
         parser.error('The threshold is invalid.')
 
 if __name__ == '__main__':
@@ -687,9 +716,9 @@ if __name__ == '__main__':
     
     log.info('')
     hline()
-    log.info(f'[log] Date: %s', str(date.today()))
-    log.info(f'[log] Sample: %s', sample)
-    log.info(f'[log] Input file(s): %s', f'\n\t\t     '.join(args.file))
+    log.info('[log] Date: %s', str(date.today()))
+    log.info('[log] Sample: %s', sample)
+    log.info('[log] Input file(s): %s', '\n\t\t     '.join(args.file))
         
     # Load HLA frequencies
     prior = pd.read_csv(hla_freq, delimiter='\t')
@@ -700,16 +729,16 @@ if __name__ == '__main__':
     check_ref()
     
     # Loads reference information
-    #with open(hla_p, 'rb') as file:
-    #    reference_info = pickle.load(file)
-    #    (commithash,(gene_set, allele_idx, 
-    #     lengths, gene_length)) = reference_info
     with open(hla_json, 'r') as file:
         reference_info = json.load(file)
-        (commithash,(gene_set, allele_idx, 
+        (commithash,(gene_set, allele_idx,
          lengths, gene_length)) = reference_info
-        
-    log.info(f'[log] Reference: %s', commithash)
+        allele_idx = json.loads(allele_idx)
+        lengths = json.loads(lengths)
+        gene_length = json.loads(gene_length)
+        reference_info = (commithash, (gene_set, allele_idx, lengths, gene_length))
+
+    log.info('[log] Reference: %s', commithash)
     hline()
         
     if args.file[0].endswith('.alignment.p'):
@@ -733,13 +762,13 @@ if __name__ == '__main__':
     
     hline()
     log.info('[genotype] Genotyping parameters:')
-    log.info(f'\t\tpopulation: %s', args.population)
-    log.info(f'\t\tminimum count: %s', args.min_count)
-    log.info(f'\t\tmax iterations: %s', args.max_iterations)
-    log.info(f'\t\ttolerance: %s', args.tolerance)
-    log.info(f'\t\tdrop iterations: %s', args.drop_iterations)
-    log.info(f'\t\tdrop threshold: %s', args.drop_threshold)
-    log.info(f'\t\tzygosity threshold: %s', args.zygosity_threshold)
+    log.info('\t\tpopulation: %s', args.population)
+    log.info('\t\tminimum count: %s', args.min_count)
+    log.info('\t\tmax iterations: %s', args.max_iterations)
+    log.info('\t\ttolerance: %s', args.tolerance)
+    log.info('\t\tdrop iterations: %s', args.drop_iterations)
+    log.info('\t\tdrop threshold: %s', args.drop_threshold)
+    log.info('\t\tzygosity threshold: %s', args.zygosity_threshold)
     
     # For each HLA locus, perform EM then scoring
     for gene in args.genes:

@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
 #-------------------------------------------------------------------------------
 #   quant.py: genotypes from extracted chromosome 6 reads.
@@ -31,8 +30,6 @@ import pickle
 import argparse
 import logging as log
 
-import numpy as np
-import math
 import pandas as pd
 
 from datetime import date
@@ -57,15 +54,13 @@ parameters_json = rootDir + 'dat/info/parameters.json'
 def arg_check_files(parser, arg):
     for file in arg.split():
         if not os.path.isfile(file):
-            parser.error('The file %s does not exist.' %file)
+            parser.error(f'The file {file} does not exist.')
         elif not (file.endswith('alignment.p') or file.endswith('.fq.gz') or file.endswith('.fastq.gz') or file.endswith('.tsv') or file.endswith('.json')):
-            parser.error('The format of %s is invalid.' %file)
+            parser.error(f'The format of {file} is invalid.')
         return arg
 
 if __name__ == '__main__':
     
-    #with open(parameters, 'rb') as file:
-    #    genes, populations, databases = pickle.load(file)
     with open(parameters_json, 'r') as file:
         genes, populations, _ = json.load(file)
         genes = set(genes)
@@ -232,14 +227,19 @@ if __name__ == '__main__':
             idx_allele[gene].add(idx)
             hla_indices.add(int(idx))
 
+    est_counts_arr = kallisto_results['est_counts'].values
+    length_arr = kallisto_results['length'].values
+    tpm_arr = kallisto_results['tpm'].values
+
     lengths = defaultdict(float)
     counts = defaultdict(float)
     tpm = defaultdict(float)
     for gene, indices in idx_allele.items():
         for idx in indices:
-            counts[gene] += kallisto_results.loc[int(idx)]['est_counts']
-            lengths[gene] += kallisto_results.loc[int(idx)]['length']
-            tpm[gene] += kallisto_results.loc[int(idx)]['tpm']
+            int_idx = int(idx)
+            counts[gene] += est_counts_arr[int_idx]
+            lengths[gene] += length_arr[int_idx]
+            tpm[gene] += tpm_arr[int_idx]
 
     gene_results = {gene:defaultdict(int) for gene in genes}
 
@@ -270,7 +270,7 @@ if __name__ == '__main__':
     df.index.names = ['gene']
     try:
         df = df[['allele1','allele2', 'allele1_count', 'allele2_count', 'allele1_tpm', 'allele2_tpm', 'baf']]
-    except:
+    except Exception:
         df = df[['allele1', 'allele1_count', 'allele1_tpm']]
     df.to_csv(allele_results_tsv,sep='\t')
     
@@ -289,51 +289,36 @@ if __name__ == '__main__':
 
     # LOH functionality
     if(args.LOH):
-        corrections_columns = []
+        corrections_row = {}
 
         for gene in genes:
-            corrections_columns.append(gene+"_CN_1")
-            corrections_columns.append(gene+"_CN_2")
-            corrections_columns.append(gene+"_LOSS")
-            corrections_columns.append(gene+"_lost")
-
-        corrections_df=pd.DataFrame(columns = corrections_columns)
-
-        for gene in genes:
-            baf1 = allele_results[gene]['allele1_count'] / (allele_results[gene]['allele1_count'] + \
+            baf1 = allele_results[gene]['allele1_count'] / (allele_results[gene]['allele1_count'] +
                                                         allele_results[gene]['allele2_count'])
             baf2 = 1-baf1
 
             correction1 = (2*baf1*(1 + args.purity*(args.ploidy - 2)/2) + args.purity - 1)/(args.purity)
             correction2 = (2*baf2*(1 + args.purity*(args.ploidy - 2)/2) + args.purity - 1)/(args.purity)
 
-            if correction1 < correction2:
-                minor = correction1
-                major = correction2
-            else:
-                minor = correction2
-                major = correction1
-
-            corrections_df.at[0,gene+"_CN_1"] = correction1
-            corrections_df.at[0,gene+"_CN_2"] = correction2
+            corrections_row[gene+"_CN_1"] = correction1
+            corrections_row[gene+"_CN_2"] = correction2
 
             if (correction1 < 0.5) or (correction2 < 0.5):
-                corrections_df.at[0,gene+"_LOSS"] = True
+                corrections_row[gene+"_LOSS"] = True
 
                 if (correction1 < 0.5) and (correction2 < 0.5):
-                    corrections_df.at[0,gene+"_lost"] = ",".join(allele_results[gene][['allele1', \
-                                                            'allele2']].tolist())
+                    corrections_row[gene+"_lost"] = ",".join([allele_results[gene]['allele1'],
+                                                              allele_results[gene]['allele2']])
 
-                elif (correction1 < 0.5) :
-                    corrections_df.at[0,gene+"_lost"] = allele_results[gene]['allele1']
+                elif (correction1 < 0.5):
+                    corrections_row[gene+"_lost"] = allele_results[gene]['allele1']
 
                 else:
-                    corrections_df.at[0,gene+"_lost"] = allele_results[gene]['allele2']
+                    corrections_row[gene+"_lost"] = allele_results[gene]['allele2']
 
             else:
-                corrections_df.at[0,gene+"_LOSS"] = False
-                corrections_df.at[0,gene+"_lost"] = "none"
+                corrections_row[gene+"_LOSS"] = False
+                corrections_row[gene+"_lost"] = "none"
 
-        corrections_df.to_csv(loh_results_tsv,sep='\t',index=False)
+        pd.DataFrame([corrections_row]).to_csv(loh_results_tsv,sep='\t',index=False)
 
 #-----------------------------------------------------------------------------

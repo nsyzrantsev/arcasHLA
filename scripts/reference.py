@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
 #-------------------------------------------------------------------------------
 #   reference.py: builds HLA references for genotyping.
@@ -26,7 +25,6 @@
 import sys
 import re
 import json
-#import pickle
 import argparse
 import logging as log
 import numpy as np
@@ -133,74 +131,78 @@ def process_hla_dat():
     complete_2fields = set()
     partial_alleles = set()
 
+    line_count = 0
     with open(hla_dat, 'r', encoding='UTF-8') as file:
-        lines = file.read().splitlines()
-        
-    # Check if hla.dat failed to download
-    if len(lines) < 10:
-        sys.exit('[reference] Error: dat/IMGTHLA/hla.dat empty or corrupted.')
+        for line in file:
+            line = line.rstrip('\n')
+            line_count += 1
 
-    for line in lines:
-        # Denotes end of sequence, add allele to database
-        if line.startswith('//'):
-            if sequence and allele in exons:
-                sequences[allele] = seq
-                gene_exons[gene].add(number)
-                gene_set.add(gene)
-                
-                if not partial:
-                    complete_alleles.add(allele)
-                    complete_2fields.add(process_allele(allele,2))
-                    
+            # Denotes end of sequence, add allele to database
+            if line.startswith('//'):
+                if sequence and allele in exons:
+                    sequences[allele] = ''.join(seq_parts)
+                    gene_exons[gene].add(number)
+                    gene_set.add(gene)
+
+                    if not partial:
+                        complete_alleles.add(allele)
+                        complete_2fields.add(process_allele(allele,2))
+
+                    else:
+                        partial_alleles.add(allele)
+                partial = False
+
+            # Denotes partial alleles
+            elif line.startswith('FT') and 'partial' in line:
+                partial = True
+
+            # Allele name and gene
+            elif line.startswith('FT') and 'allele="HLA-' in line:
+                # Extract allele name after 'HLA-', stripping trailing quote
+                hla_pos = line.index('HLA-') + 4
+                allele = line[hla_pos:].rstrip().rstrip('"')
+                gene = get_gene(allele)
+
+                exon = sequence = False
+                seq_parts = []
+
+            # Exon coordinates
+            elif line.startswith('FT') and 'exon' in line:
+                info = line.split()
+                start = int(info[2].split('..')[0]) - 1
+                stop = int(info[2].split('..')[1])
+                exon_coord = [start, stop]
+                exon = True
+
+            # Exon number on following line
+            elif exon:
+                number = line.split('"')[1]
+                exons[allele][number] = exon_coord
+                exon = False
+
+            # UTRs
+            elif line.startswith('FT') and ' UTR ' in line:
+                info = line.split()
+                start = int(info[2].split('..')[0]) - 1
+                stop = int(info[2].split('..')[1])
+                utr_coord = [start, stop]
+
+                if allele not in exons:
+                    utrs[allele]['utr5'] = utr_coord
                 else:
-                    partial_alleles.add(allele)
-            partial = False
+                    utrs[allele]['utr3'] = utr_coord
 
-        # Denotes partial alleles
-        elif line.startswith('FT') and 'partial' in line:
-            partial = True
-            
-        # Allele name and gene
-        elif line.startswith('FT') and re.search('allele\="HLA-', line):   
-            allele = re.split('HLA-', re.sub('["\n]','',line))[1]
-            gene = get_gene(allele)
 
-            exon = sequence = False
-            seq = ''
+            # Start of sequence
+            elif line.startswith('SQ'):
+                sequence = True
 
-        # Exon coordinates
-        elif line.startswith('FT') and re.search('exon',line):
-            info = re.split('\s+', line)
-            start = int(info[2].split('..')[0]) - 1
-            stop = int(info[2].split('..')[1])
-            exon_coord = [start, stop]
-            exon = True
+            elif sequence and line.startswith(' '):
+                seq_parts.append(''.join(line.split()[:-1]).upper())
 
-        # Exon number on following line
-        elif exon:
-            number = re.split('"', line)[1]
-            exons[allele][number] = exon_coord
-            exon = False
-
-        # UTRs
-        elif line.startswith('FT') and (re.search('\sUTR\s',line)):
-            info = re.split('\s+', line)
-            start = int(info[2].split('..')[0]) - 1
-            stop = int(info[2].split('..')[1])
-            utr_coord = [start, stop]
-
-            if allele not in exons:
-                utrs[allele]['utr5'] = utr_coord
-            else:
-                utrs[allele]['utr3'] = utr_coord
-
-                
-        # Start of sequence
-        elif line.startswith('SQ'):
-            sequence = True
-
-        elif sequence and line.startswith(' '):
-            seq += ''.join(line.split()[:-1]).upper()
+    # Check if hla.dat failed to download
+    if line_count < 10:
+        sys.exit('[reference] Error: dat/IMGTHLA/hla.dat empty or corrupted.')
             
     # select only 2-field partial alleles
     partial_alleles = {allele for allele in partial_alleles 
@@ -233,22 +235,23 @@ def process_hla_nom(hla_nom):
     single_alleles = set()
     grouped_alleles = set()
 
-    for line in open(hla_nom, 'r', encoding='UTF-8'):
-        if line.startswith('#'):
-            continue
+    with open(hla_nom, 'r', encoding='UTF-8') as f:
+        for line in f:
+            if line.startswith('#'):
+                continue
 
-        gene, alleles, group = line.split(';')
-        alleles = [gene + allele for allele in alleles.split('/')]
-        if len(group) == 1:
-            single_alleles.add(alleles[0])
-            continue
-            
-        group = gene + group[:-1]
-        
-        for allele in alleles:
-            grouped_alleles.add(process_allele(allele,2))
-            for i in range(2,5):
-                allele_to_group[i][process_allele(allele,i)] = group
+            gene, alleles, group = line.split(';')
+            alleles = [gene + allele for allele in alleles.split('/')]
+            if len(group) == 1:
+                single_alleles.add(alleles[0])
+                continue
+
+            group = gene + group[:-1]
+
+            for allele in alleles:
+                grouped_alleles.add(process_allele(allele,2))
+                for i in range(2,5):
+                    allele_to_group[i][process_allele(allele,i)] = group
 
     # Alleles not included in a group
     for allele in single_alleles:
@@ -273,8 +276,6 @@ def write_reference(sequences, info, fasta, idx, database, type):
         SeqIO.write(sequences, file, 'fasta')
         
     commithash = hla_dat_version()
-    #with open(database,'wb') as file:
-    #    pickle.dump([commithash,info],file)
     with open(database, 'w') as file:
         if(len(info) == 4):
             json.dump([commithash,[list(info[0]), 
@@ -339,13 +340,14 @@ def build_fasta():
                 seq = sequences[allele][start:stop]
                 other.add(seq)
                
-    # Constructs exon combination sequences for complete and 
+    # Constructs exon combination sequences for complete and
     # partial alleles
     def build_combination(allele):
-        for exon_group in exon_combinations:
-            if set(exon_group) & set(exons[allele]) != set(exon_group):
+        allele_exon_keys = set(exons[allele])
+        for exon_group_set, exon_group in zip(exon_group_sets, exon_combinations):
+            if not exon_group_set.issubset(allele_exon_keys):
                 continue
- 
+
             coords = []
             for n in exon_group: coords.append(exons[allele][n])
             seq = [sequences[allele][start:stop] for start,stop in coords]
@@ -432,7 +434,8 @@ def build_fasta():
          utrs, exons, final_exon_length) = process_hla_dat()
                        
     exon_combinations = get_exon_combinations()
-    
+    exon_group_sets = [set(eg) for eg in exon_combinations]
+
     gene_length = defaultdict(list)
     cDNA = defaultdict(set)
     combo = {str(i):defaultdict(set) for i in exon_combinations}
@@ -482,9 +485,6 @@ def build_convert(reset=False):
     p_group = process_hla_nom(hla_nom_p)
     g_group = process_hla_nom(hla_nom_g)
     
-    #with open(hla_convert, 'wb') as file:
-    #    pickle.dump([p_group,g_group], file)
-    # todo, test this:
     with open(hla_convert_json, 'w') as file:
         json.dump([p_group,g_group],file)
         
@@ -493,9 +493,13 @@ def build_convert(reset=False):
 
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, np.int64):
+        if isinstance(obj, np.integer):
             return int(obj)
-        return json.JSONEncoder.default(self, obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 #-------------------------------------------------------------------------------
 #   Main
@@ -503,11 +507,6 @@ class NumpyEncoder(json.JSONEncoder):
     
 if __name__ == '__main__':
 
-    #with open(parameters, 'rb') as file:
-    #    _, _, versions = pickle.load(file)
-    #    temp1, temp2, versions = pickle.load(file)
-    #with open(parameters_json, 'w') as file:
-    #    json.dump([list(temp1),list(temp2),versions],file)
     with open(parameters_json, 'r') as file:
         _, _, versions = json.load(file)
 

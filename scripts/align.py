@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
 #-------------------------------------------------------------------------------
 #   align.py: alignment functions for genotyping.
@@ -30,8 +29,6 @@ import pickle
 import argparse
 import logging as log
 
-import numpy as np
-import math
 import pandas as pd
 
 from datetime import date
@@ -77,9 +74,11 @@ def pseudoalign(fqs, sample, paired, reference, outdir, temp, threads, avg, std)
         command = [cat, '<', fq, awk, '>>', reads_file]
         run_command(command)
 
-    read_lengths = np.genfromtxt(reads_file)
-
-    if len(read_lengths) == 0:
+    num = 0
+    with open(reads_file, 'r') as f:
+        for _ in f:
+            num += 1
+    if num == 0:
         sys.exit('[genotype] Error: FASTQ files are empty; check arcasHLA extract for issues.')
 
     command = ['kallisto pseudo -i', reference, '-t', threads, '-o', temp]
@@ -89,8 +88,6 @@ def pseudoalign(fqs, sample, paired, reference, outdir, temp, threads, avg, std)
 
     command.extend(fqs)
     run_command(command, '[alignment] Pseudoaligning with Kallisto: ')
-
-    num = len(read_lengths)
 
     return num
 
@@ -104,36 +101,51 @@ def process_counts(count_file, eq_file, gene_list, allele_idx, allele_lengths):
     # Process count information
     counts = dict()
     with open(count_file, 'r', encoding='UTF-8') as file:
-        for line in file.read().splitlines():
+        for line in file:
+            line = line.rstrip('\n')
             eq, count = line.split('\t')
             counts[eq] = float(count)
 
-    
+
     # Process compatibility classes
     eqs = dict()
     with open(eq_file, 'r', encoding='UTF-8') as file:
-        for line in file.read().splitlines():
+        for line in file:
+            line = line.rstrip('\n')
             eq, indices = line.split('\t')
             eqs[eq] = indices.split(',')
 
     # Set up compatibility class index
     eq_idx = defaultdict(list)
-    
+
     count_unique = 0
     count_multi = 0
-    
+
+    # Pre-compute gene for each index to avoid repeated string splits
+    idx_gene = {}
+    for idx, alleles in allele_idx.items():
+        if alleles:
+            idx_gene[idx] = alleles[0].split('*')[0]
+
     for eq, indices in eqs.items():
-        if [idx for idx in indices if not allele_idx[idx]]:
+        if any(idx not in idx_gene for idx in indices):
             continue
 
-        genes = list({get_gene(allele) for idx in indices 
-                        for allele in allele_idx[idx]})
+        # Determine gene set with early exit on multi-gene
+        gene = None
+        multi_gene = False
+        for idx in indices:
+            g = idx_gene[idx]
+            if gene is None:
+                gene = g
+            elif g != gene:
+                multi_gene = True
+                break
+
         count = counts[eq]
-        
-        if len(genes) == 1 and counts[eq] > 0:
-            gene = genes[0]
+
+        if not multi_gene and count > 0:
             eq_idx[gene].append((indices, count))
-            
             count_unique += count
         else:
             count_multi += count
@@ -154,13 +166,15 @@ def process_partial_counts(count_file, eq_file, allele_idx, allele_lengths,
     log.info('[alignment] Processing pseudoalignment')
     counts_index = dict()
     with open(count_file,'r', encoding='UTF-8') as file:
-        for line in file.read().splitlines():
+        for line in file:
+            line = line.rstrip('\n')
             eq, count = line.split('\t')
             counts_index[eq] = float(count)
 
     eqs = dict()
     with open(eq_file,'r', encoding='UTF-8') as file:
-        for line in file.read().splitlines():
+        for line in file:
+            line = line.rstrip('\n')
             eq, indices = line.split('\t')
             eqs[eq] = indices.split(',')
 
@@ -168,22 +182,36 @@ def process_partial_counts(count_file, eq_file, allele_idx, allele_lengths,
     count_unique = 0
     count_multi = 0
 
+    # Pre-compute gene for each index to avoid repeated string splits
+    idx_gene = {}
+    for idx, alleles in allele_idx.items():
+        if alleles:
+            idx_gene[idx] = alleles[0].split('*')[0]
+
     for eq, indices in eqs.items():
-        if [index for index in indices if not allele_idx[index]]:
+        if any(index not in idx_gene for index in indices):
             continue
 
-        genes = list({allele.split('*')[0] for index in indices 
-                      for allele in allele_idx[index]})
-        
+        # Determine gene set with early exit on multi-gene
+        gene = None
+        multi_gene = False
+        for index in indices:
+            g = idx_gene[index]
+            if gene is None:
+                gene = g
+            elif g != gene:
+                multi_gene = True
+                break
+
         count = counts_index[eq]
-                      
-        exons = list({exon_idx[index] for index in indices})
-        if len(genes) == 1 and  count > 0:
-            gene = genes[0]
-            for exon in exons:
-                exon_indices = list({index for index in indices 
-                                      if exon_idx[index] == exon})
-                                     
+
+        if not multi_gene and count > 0:
+            # Single-pass exon grouping with defaultdict
+            exon_groups = defaultdict(list)
+            for index in indices:
+                exon_groups[exon_idx[index]].append(index)
+
+            for exon, exon_indices in exon_groups.items():
                 eq_idx[exon][gene].append((exon_indices, count))
             count_unique += count
         else:
@@ -198,7 +226,7 @@ def get_count_stats(eq_idx, gene_length):
 
     abundances = defaultdict(float)
     for gene, eqs in eq_idx.items():
-        count = sum([count for eq,count in eqs])
+        count = sum(count for eq,count in eqs)
         abundances[gene] = count / gene_length[gene]
         stats[gene][0] = count
         stats[gene][1] = len(eqs)
@@ -253,15 +281,11 @@ def get_alignment(fqs, sample, reference, reference_info, outdir,
     
     # Process partial genotyping pseudoalignment
     if partial:
-        (commithash, (gene_set, allele_idx, exon_idx, 
+        (commithash, (gene_set, allele_idx, exon_idx,
             lengths, partial_exons, partial_alleles)) = reference_info
 
         gene_set = set(gene_set)
-        allele_idx = json.loads(allele_idx)
-        exon_idx = json.loads(exon_idx)
-        lengths = json.loads(lengths)
-        lengths = dict([int(a), int(x)] for a, x in lengths.items())
-        partial_exons = json.loads(partial_exons)
+        lengths = {int(a): int(x) for a, x in lengths.items()}
         partial_alleles = set(partial_alleles)
         
         exon_combos = get_exon_combinations() 
@@ -287,11 +311,8 @@ def get_alignment(fqs, sample, reference, reference_info, outdir,
              lengths, gene_length)) = reference_info
 
         gene_set = set(gene_set)
-        allele_idx = json.loads(allele_idx)
-        gene_length = json.loads(gene_length)
-        gene_length = dict([a, int(x)] for a, x in gene_length.items())
-        lengths = json.loads(lengths)
-        lengths = dict([int(a), int(x)] for a, x in lengths.items())
+        gene_length = {a: int(x) for a, x in gene_length.items()}
+        lengths = {int(a): int(x) for a, x in lengths.items()}
 
         eq_idx, allele_eq, align_stats = process_counts(count_file,
                                                         eq_file, 
@@ -306,7 +327,6 @@ def get_alignment(fqs, sample, reference, reference_info, outdir,
         gene_stats = get_count_stats(eq_idx, gene_length)
         gene_summary(gene_stats)
 
-        #todo, switch to json?
         with open(''.join([outdir, sample, '.alignment.p']), 'wb') as file:
             alignment_info = [commithash, eq_idx, allele_eq, paired,
                     align_stats, gene_stats]
@@ -320,7 +340,7 @@ def get_alignment(fqs, sample, reference, reference_info, outdir,
 def load_alignment(file, commithash, partial = False):
     '''Loads previous pseudoalignment.'''
     
-    log.info(f'[alignment] Loading previous alignment %s', file)
+    log.info('[alignment] Loading previous alignment %s', file)
     
     with open(file, 'rb') as file:
         alignment_info = pickle.load(file)
@@ -335,7 +355,7 @@ def load_alignment(file, commithash, partial = False):
         else:
             (commithash_alignment, eq_idx, allele_eq, paired, 
                  align_stats, gene_stats, num, avg, std) = alignment_info
-            align_stats = align_stats.extend([num, avg, std])
+            align_stats.extend([num, avg, std])
             alignment_info = [commithash, eq_idx, allele_eq, paired, 
                               align_stats, gene_stats]
     

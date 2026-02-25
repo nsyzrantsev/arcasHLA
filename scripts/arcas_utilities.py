@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
 #-------------------------------------------------------------------------------
 #   arcas_utilities.py: functions common to multiple arcasHLA scripts.
@@ -26,6 +25,7 @@ import os
 import re
 import logging as log
 import uuid
+from functools import lru_cache
 from subprocess import PIPE, STDOUT, run
 
 #-------------------------------------------------------------------------------
@@ -35,6 +35,7 @@ __date__        = '2022-01-27'
 
 #-------------------------------------------------------------------------------
 
+@lru_cache(maxsize=65536)
 def process_allele(allele, n, keep_alpha = True):
     '''Lowers allele resolution to n-fields.'''
     temp = []
@@ -70,7 +71,7 @@ def remove_files(files, keep_files):
     if keep_files:
         return
 
-    if type(files) == list:
+    if isinstance(files, list):
         for file in files:
             run_command(['rm -rf',file])
     else:
@@ -78,7 +79,7 @@ def remove_files(files, keep_files):
         
 def run_command(command, message = ''):
     '''Outputs message and command to log, runs command and returns output.'''
-    if type(command) == list:
+    if isinstance(command, list):
         command = ' '.join(command)
 
     if message: 

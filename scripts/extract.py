@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+#!/usr/bin/env python3
 
 #-------------------------------------------------------------------------------
 #   extract.py: extracts chromosome 6 reads from a BAM file for HLA genotyping.
@@ -25,7 +24,6 @@
 import os
 import sys
 import re
-import pickle
 import json
 import argparse
 import logging as log
@@ -268,16 +266,14 @@ if __name__ == '__main__':
         
     log.info('')
     hline()
-    log.info(f'[log] Date: %s', str(date.today()))
-    log.info(f'[log] Sample: %s', sample)
-    log.info(f'[log] Input file: %s', args.bam)
+    log.info('[log] Date: %s', str(date.today()))
+    log.info('[log] Sample: %s', sample)
+    log.info('[log] Input file: %s', args.bam)
     log.info('[log] Read type: {}-end'
              .format( 'paired' if not args.single else 'single'))
     hline()
     
     # Load names of regions outside chr6 with HLA loci
-    #with open(datDir + '/info/decoys_alts.p', 'rb') as file:
-    #    alts = pickle.load(file)
     with open(datDir + 'info/decoys_alts.json', 'r') as file:
         alts = json.load(file)
 
