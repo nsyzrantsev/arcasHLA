@@ -151,6 +151,9 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
     eq_alleles = np.array(flat_indices, dtype=np.int64)
     counts_arr = np.array(counts_list, dtype=np.float64)
 
+    # Note: if no eq classes contain alleles in allele_to_int, all arrays are
+    # empty and EM converges immediately with zero abundances. This is safe.
+
     # Pre-separate single-allele eq classes for fast path
     sizes = eq_offsets[1:] - eq_offsets[:-1]
     single_mask = sizes == 1
@@ -158,6 +161,8 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
     single_allele_ints = eq_alleles[single_eq_offsets]
     single_counts = counts_arr[single_mask]
     multi_indices = np.where(~single_mask)[0]
+    multi_allele_lists = [(eq_alleles[eq_offsets[i]:eq_offsets[i+1]], counts_arr[i])
+                          for i in multi_indices]
 
     # Initialize theta0 as array
     theta0 = np.array([theta0_dict.get(a, 0.0) for a in all_alleles],
@@ -166,16 +171,15 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
     def update_abundances_vec(ab_arr):
         new_counts = np.zeros(n_alleles, dtype=np.float64)
         # Fast path: single-allele classes — pure numpy
-        np.add.at(new_counts, single_allele_ints, single_counts)
+        if len(single_allele_ints) > 0:
+            new_counts += np.bincount(single_allele_ints, weights=single_counts, minlength=n_alleles)
         # Slow path: multi-allele classes — Python loop (fewer iterations)
-        for i in multi_indices:
-            s, e = eq_offsets[i], eq_offsets[i+1]
-            idxs = eq_alleles[s:e]
+        for idxs, count in multi_allele_lists:
             ab = ab_arr[idxs]
             total = ab.sum()
             if total == 0.0:
                 continue
-            new_counts[idxs] += counts_arr[i] * (ab / total)
+            new_counts[idxs] += count * (ab / total)
         # Normalize by length
         ab = new_counts / len_arr
         total = ab.sum()
@@ -208,8 +212,9 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
         theta2 = update_abundances_vec(theta1)
 
         # Compute r and v vectors
-        r = theta1 - theta0
-        v = (theta2 - theta1) - r
+        r = np.subtract(theta1, theta0)
+        v = np.subtract(theta2, theta1, out=theta2)  # reuse theta2 storage
+        v -= r
 
         srss_r = np.linalg.norm(r)
         srss_v = np.linalg.norm(v)
@@ -217,7 +222,7 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
         if srss_v != 0:
             # Compute step length
             alpha = -(srss_r / srss_v)
-            theta_prime = theta0 - 2*alpha*r + alpha**2 * v
+            theta_prime = theta0 + (-2.0 * alpha) * r + (alpha * alpha) * v
 
             step_min = theta_prime.min()
             # Adjust step rather than kicking out alleles with a negative result
@@ -238,9 +243,10 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
         keep = drop_alleles_vec(theta_prime, iterations, converged)
         if keep is not False:
             # Remap to compacted arrays
+            keep_list = keep.tolist()
             n_alleles = len(keep)
-            all_alleles = [all_alleles[k] for k in keep]
-            old_to_new = {int(old): new for new, old in enumerate(keep)}
+            all_alleles = [all_alleles[k] for k in keep_list]
+            old_to_new = {old: new for new, old in enumerate(keep_list)}
             len_arr = len_arr[keep]
             theta0 = theta_prime[keep]
 
@@ -248,10 +254,11 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
             new_offsets = [0]
             new_flat = []
             new_counts = []
+            eq_alleles_list = eq_alleles.tolist()
             for i in range(len(counts_arr)):
-                s, e = eq_offsets[i], eq_offsets[i+1]
-                mapped = [old_to_new[int(x)] for x in eq_alleles[s:e]
-                          if int(x) in old_to_new]
+                s, e = int(eq_offsets[i]), int(eq_offsets[i+1])
+                mapped = [old_to_new[x] for x in eq_alleles_list[s:e]
+                          if x in old_to_new]
                 if mapped:
                     new_flat.extend(mapped)
                     new_counts.append(counts_arr[i])
@@ -268,6 +275,8 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
             single_allele_ints = eq_alleles[single_eq_offsets]
             single_counts = counts_arr[single_mask]
             multi_indices = np.where(~single_mask)[0]
+            multi_allele_lists = [(eq_alleles[eq_offsets[i]:eq_offsets[i+1]], counts_arr[i])
+                                  for i in multi_indices]
         else:
             theta0 = theta_prime
 
@@ -276,7 +285,7 @@ def expectation_maximization(eqs, lengths, allele_idx, population, prior,
     log.info(f'[genotype] EM converged after {iterations} iterations')
 
     # Convert back to dict for return value
-    return {all_alleles[i]: theta0[i] for i in range(n_alleles) if theta0[i] > 0}
+    return {a: v for a, v in zip(all_alleles, theta0) if v > 0}
 
 def predict_genotype(eqs, allele_idx, allele_eq, em_results, gene_count, 
                      population, prior, zygosity_threshold):
